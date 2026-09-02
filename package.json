@@ -1,0 +1,27 @@
+{
+  "name": "t3-orchestrator-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP server that lets a coding agent start, monitor, and steer T3 Code threads.",
+  "type": "module",
+  "bin": { "t3-orchestrator-mcp": "dist/index.js" },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "dev": "tsx src/index.ts",
+    "pair": "tsx src/index.ts pair",
+    "status": "tsx src/index.ts status",
+    "inspect": "npx @modelcontextprotocol/inspector node dist/index.js"
+  },
+  "engines": { "node": ">=22" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}
