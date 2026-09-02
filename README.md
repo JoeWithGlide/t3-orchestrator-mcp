@@ -53,7 +53,13 @@ Global, so it is available in every Claude Code session including ones running i
 }
 ```
 
-Or per project in `.mcp.json`. Codex, Cursor, Grok, and OpenCode need their own MCP registration if you want threads on those providers to orchestrate too.
+Or per project in `.mcp.json`, or with `claude mcp add --scope user t3 -- node /path/to/dist/index.js`.
+
+Codex: `codex mcp add t3 -- node /path/to/dist/index.js` (writes `[mcp_servers.t3]` to `~/.codex/config.toml`).
+
+Pi: add the same `t3` entry under `mcpServers` in `~/.pi/agent/mcp.json`. Pi also imports Claude Code's servers, so the explicit entry just removes that dependency.
+
+Cursor, Grok, and OpenCode need their own registration if threads on those providers should orchestrate too.
 
 ## Configuration
 
