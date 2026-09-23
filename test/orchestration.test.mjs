@@ -4,6 +4,8 @@ import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
+import { createServer } from 'node:http';
+import { T3Client } from '../dist/t3/client.js';
 import { prepareDispatch } from '../dist/t3/dispatch.js';
 import { turnResult, phaseOf, waitForTurn } from '../dist/t3/turns.js';
 import { rpcCall } from '../dist/t3/rpc.js';
@@ -14,11 +16,14 @@ test('dispatch survives a coordinator restart without changing IDs or resolved d
   const dir = await mkdtemp(path.join(tmpdir(), 't3-dispatch-'));
   try {
     const first = await prepareDispatch('http://localhost:3773', 'start', 'ticket-1', { title: 'hello', worktree: { branch: 'one', baseBranch: 'main' } }, command, dir);
-    const retry = await prepareDispatch('http://localhost:3773', 'start', 'ticket-1', { worktree: { baseBranch: 'main', branch: 'one' }, title: 'hello' }, command, dir);
+    const retry = await prepareDispatch('http://localhost:3773', 'start', 'ticket-1', { worktree: { baseBranch: 'main', branch: 'one' }, title: 'hello' }, () => { throw new Error('must preserve recorded defaults'); }, dir);
     assert.equal(retry.reused, true);
     assert.deepEqual(retry.command, first.command);
     await assert.rejects(prepareDispatch('http://localhost:3773', 'start', 'ticket-1', { title: 'different' }, command, dir), /different arguments/);
     assert.equal((await stat(path.join(dir, 'dispatches'))).mode & 0o777, 0o700);
+    const concurrent = await Promise.all(Array.from({ length: 24 }, () => prepareDispatch('http://localhost:3773', 'start', 'concurrent', { prompt: 'hello' }, command, dir)));
+    assert.equal(concurrent.filter(r => !r.reused).length, 1);
+    assert.equal(new Set(concurrent.map(r => r.command.threadId)).size, 1);
   } finally { await rm(dir, { recursive: true }); }
 });
 
@@ -27,24 +32,27 @@ const now = '2026-09-20T10:01:00.000Z';
 const thread = () => ({ id: 'thread', session: { status: 'ready' }, latestTurn: { turnId: 'turn', state: 'completed', requestedAt: now, assistantMessageId: 'reply' }, messages: [{ id: 'prompt', role: 'user', createdAt: now, turnId: null, streaming: false }, { id: 'reply', role: 'assistant', turnId: 'turn', text: 'done', streaming: false }] });
 
 test('wait matches the requested prompt and its completed assistant reply', () => {
-  assert.equal(turnResult(thread(), 'prompt').reply.text, 'done');
+  assert.equal(turnResult(thread(), 'prompt', null).reply.text, 'done');
+  assert.equal(turnResult(thread(), 'prompt', 'turn').completed, false);
+  const wrongTurn = thread(); wrongTurn.messages[0].turnId = 'different-turn';
+  assert.equal(turnResult(wrongTurn, 'prompt', null).completed, false);
   const stale = thread(); stale.latestTurn.requestedAt = old;
-  assert.equal(turnResult(stale, 'prompt').completed, false);
-  assert.equal(turnResult(stale, 'prompt').reply, null);
+  assert.equal(turnResult(stale, 'prompt', null).completed, false);
+  assert.equal(turnResult(stale, 'prompt', null).reply, null);
   const streaming = thread(); streaming.messages[1].streaming = true;
-  assert.equal(turnResult(streaming, 'prompt').completed, false);
+  assert.equal(turnResult(streaming, 'prompt', null).completed, false);
   const superseded = thread(); superseded.messages.push({ id: 'newer', role: 'user', createdAt: now });
-  assert.equal(turnResult(superseded, 'prompt').status, 'superseded');
-  assert.equal(turnResult(superseded, 'prompt').reply, null);
+  assert.equal(turnResult(superseded, 'prompt', null).status, 'superseded');
+  assert.equal(turnResult(superseded, 'prompt', null).reply, null);
 });
 
 test('blocked, interrupted, missing, and unknown states never count as completion', async () => {
   const interrupted = thread(); interrupted.latestTurn.state = 'interrupted';
-  assert.equal(turnResult(interrupted, 'prompt').completed, false);
+  assert.equal(turnResult(interrupted, 'prompt', null).completed, false);
   assert.equal(phaseOf({ ...thread(), hasPendingUserInput: true }), 'blocked');
   assert.throws(() => phaseOf({ ...thread(), latestTurn: { state: 'new-wire-state' } }), /Unknown T3 turn state/);
   const client = { thread: async () => ({ thread: thread() }), shell: async () => ({ threads: [thread()] }), threadUrl: () => 'http://t3/thread' };
-  const missing = await waitForTurn(client, 'thread', 'missing', 0);
+  const missing = await waitForTurn(client, 'thread', 'missing', null, 0);
   assert.equal(missing.timedOut, true);
   assert.equal(missing.completed, false);
 });
@@ -141,4 +149,16 @@ test('MCP retries launch once, recover lost responses, attach worktrees, and ded
     else process.env.T3_ORCHESTRATOR_CONFIG_DIR = previous;
     await rm(dir, { recursive: true });
   }
+});
+
+test('a fresh client can generate a retry URL without calling shell first', async () => {
+  const server = createServer((request, response) => {
+    assert.equal(request.url, '/.well-known/t3/environment');
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify({ environmentId: 'environment' }));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  try { assert.equal(await new T3Client(origin, 'test').threadUrl('thread'), `${origin}/environment/thread`); }
+  finally { await new Promise(resolve => server.close(resolve)); }
 });

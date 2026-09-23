@@ -136,10 +136,10 @@ export function registerThreadTools(server: McpServer, client: T3Client): void {
         const threads = shell.threads
           .filter((thread) => includeArchived || thread.archivedAt == null)
           .filter((thread) => !projectId || thread.projectId === projectId)
-          .map((thread) => ({ ...summarizeThread(thread), url: client.threadUrl(thread.id) }))
+          .map(summarizeThread)
           .filter((thread) => !phase || thread.phase === phase)
           .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-        return textResult({ total: threads.length, threads: threads.slice(0, limit) });
+        return textResult({ total: threads.length, threads: await Promise.all(threads.slice(0, limit).map(async (thread) => ({ ...thread, url: await client.threadUrl(thread.threadId) }))) });
       } catch (error) {
         return errorResult(error);
       }
@@ -182,7 +182,7 @@ export function registerThreadTools(server: McpServer, client: T3Client): void {
           createdAt: activity.createdAt,
         }));
         return textResult({
-          url: client.threadUrl(threadId),
+          url: await client.threadUrl(threadId),
           ...(shellThread ? summarizeThread(shellThread) : { threadId, title: thread.title, phase: phaseOf({ ...thread }) }),
           messages,
           activities,
@@ -254,7 +254,7 @@ export function registerThreadTools(server: McpServer, client: T3Client): void {
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
     async ({ idempotencyKey, wait, timeoutSeconds, ...input }) => {
-      let recovery: { threadId: string; messageId: string; idempotencyKey: string } | undefined;
+      let recovery: { threadId: string; messageId: string; previousTurnId: string | null; idempotencyKey: string } | undefined;
       try {
         const { projectId, prompt, title, modelSelection, runtimeMode, interactionMode, worktree, worktreePath } = input;
         if (worktree && worktreePath) throw new Error("Pass either worktree or worktreePath, not both.");
@@ -289,7 +289,7 @@ export function registerThreadTools(server: McpServer, client: T3Client): void {
           };
         });
         const { command } = dispatch;
-        recovery = { threadId: command.threadId, messageId: command.message.messageId, idempotencyKey: dispatch.idempotencyKey };
+        recovery = { threadId: command.threadId, messageId: command.message.messageId, previousTurnId: dispatch.previousTurnId, idempotencyKey: dispatch.idempotencyKey };
         if (!dispatch.reused) {
           await client.rpc("orchestration.dispatchCommand", command);
         } else {
@@ -302,11 +302,11 @@ export function registerThreadTools(server: McpServer, client: T3Client): void {
         return textResult({
           ...summarizeThread(detail.thread), ...recovery, reused: dispatch.reused,
           worktreeSetup: detail.thread.activities.findLast((activity) => activity.kind === "worktree-setup")?.payload ?? null,
-          url: client.threadUrl(command.threadId),
-          ...(wait ? { result: await waitForTurn(client, command.threadId, command.message.messageId, timeoutSeconds) } : {}),
+          url: await client.threadUrl(command.threadId),
+          ...(wait ? { result: await waitForTurn(client, command.threadId, command.message.messageId, dispatch.previousTurnId, timeoutSeconds) } : {}),
         });
       } catch (error) {
-        return recovery ? { ...errorResult(error), structuredContent: { ...recovery, url: client.threadUrl(recovery.threadId), recoveryRequired: true } } : errorResult(error);
+        return recovery ? { ...errorResult(error), structuredContent: { ...recovery, url: await client.threadUrl(recovery.threadId), recoveryRequired: true } } : errorResult(error);
       }
     },
   );
@@ -326,7 +326,7 @@ export function registerThreadTools(server: McpServer, client: T3Client): void {
       annotations: { readOnlyHint: false, destructiveHint: false },
     },
     async ({ idempotencyKey, wait, timeoutSeconds, ...input }) => {
-      let recovery: { threadId: string; messageId: string; idempotencyKey: string } | undefined;
+      let recovery: { threadId: string; messageId: string; previousTurnId: string | null; idempotencyKey: string } | undefined;
       try {
         const { threadId, text, runtimeMode, interactionMode } = input;
         const thread = findThread(await client.shell(), threadId);
@@ -335,16 +335,17 @@ export function registerThreadTools(server: McpServer, client: T3Client): void {
           message: { messageId: newId(), role: "user", text, attachments: [] },
           runtimeMode: runtimeMode ?? thread.runtimeMode,
           interactionMode: interactionMode ?? thread.interactionMode ?? "default", createdAt: nowIso(),
-        }));
+        }), undefined, thread.latestTurn?.turnId ?? null);
         const { command } = dispatch;
-        recovery = { threadId, messageId: command.message.messageId, idempotencyKey: dispatch.idempotencyKey };
+        recovery = { threadId, messageId: command.message.messageId, previousTurnId: dispatch.previousTurnId, idempotencyKey: dispatch.idempotencyKey };
         const detail = await client.thread(threadId);
         const sent = detail.thread.messages.some((m) => m.id === command.message.messageId);
         if (!sent) {
+          if ((detail.thread.latestTurn?.turnId ?? null) !== dispatch.previousTurnId) throw new Error("Thread advanced since this dispatch was prepared. Inspect its history before choosing a new key.");
           if (phaseOf(thread) === "running" || phaseOf(thread) === "blocked") throw new Error("Thread is running or blocked. Wait or resolve its pending request before sending new work.");
           await client.dispatch(command);
         }
-        return textResult({ ...recovery, sent: true, reused: dispatch.reused, url: client.threadUrl(threadId), ...(wait ? { result: await waitForTurn(client, threadId, command.message.messageId, timeoutSeconds) } : {}) });
+        return textResult({ ...recovery, sent: true, reused: dispatch.reused, url: await client.threadUrl(threadId), ...(wait ? { result: await waitForTurn(client, threadId, command.message.messageId, dispatch.previousTurnId, timeoutSeconds) } : {}) });
       } catch (error) {
         return recovery ? { ...errorResult(error), structuredContent: { ...recovery, recoveryRequired: true } } : errorResult(error);
       }
@@ -355,11 +356,11 @@ export function registerThreadTools(server: McpServer, client: T3Client): void {
     "t3_wait_for_turn",
     {
       description: "Wait for the reply to a specific messageId returned by start/send. Reports blocked, interrupted, error, superseded, or timedOut separately from completed. Never substitutes another turn's reply.",
-      inputSchema: { threadId: z.string(), messageId: z.string(), timeoutSeconds: z.number().int().min(1).max(MAX_WAIT_SECONDS).default(60) },
+      inputSchema: { threadId: z.string(), messageId: z.string(), previousTurnId: z.string().nullable().describe("Copy from start/send; null means this was the first turn."), timeoutSeconds: z.number().int().min(1).max(MAX_WAIT_SECONDS).default(60) },
       annotations: { readOnlyHint: true },
     },
-    async ({ threadId, messageId, timeoutSeconds }) => {
-      try { return textResult(await waitForTurn(client, threadId, messageId, timeoutSeconds)); }
+    async ({ threadId, messageId, previousTurnId, timeoutSeconds }) => {
+      try { return textResult(await waitForTurn(client, threadId, messageId, previousTurnId, timeoutSeconds)); }
       catch (error) { return errorResult(error); }
     },
   );

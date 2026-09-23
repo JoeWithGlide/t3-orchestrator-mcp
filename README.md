@@ -93,7 +93,7 @@ To attach an existing checkout, pass a `worktreePath` returned by `t3_list_workt
 
 ### Retries and recovery
 
-Persist an `idempotencyKey` before calling start or send. Reuse it with identical task arguments after a timeout; `wait` and `timeoutSeconds` may change. Calls return the key, `threadId`, `messageId`, and a local T3 URL. Changed task arguments under an existing key are rejected.
+Persist an `idempotencyKey` before calling start or send. Reuse it with identical task arguments after a timeout; `wait` and `timeoutSeconds` may change. Calls return the key, `threadId`, `messageId`, `previousTurnId`, and a local T3 URL. Changed task arguments under an existing key are rejected.
 
 Dispatch records live under `~/.config/t3-orchestrator-mcp/dispatches`, or `T3_ORCHESTRATOR_CONFIG_DIR`. They contain prompts and resolved commands, with directory mode 0700 and file mode 0600. Keep these records while a coordinator may retry, and use the same config directory across coordinator restarts. A different directory or a deleted record loses duplicate protection.
 
@@ -101,7 +101,7 @@ Launch records are written before submitting T3's bootstrap. A retry reads the o
 
 ### Waiting
 
-Use `wait: true` on start/send, or call `t3_wait_for_turn` with their returned `messageId`. Only `completed: true` proves a completed reply for that prompt. A previous reply, a streaming reply, a blocked approval, an interrupted turn, and a timeout do not count. If another prompt has overtaken it, the result is `superseded`; inspect thread history rather than treating the newer reply as its result. Replies are capped at 20,000 characters with a `truncated` flag.
+Use `wait: true` on start/send, or call `t3_wait_for_turn` with their returned `messageId` and `previousTurnId`. The latter excludes the prior turn even when T3 leaves user-message turn IDs null. Only `completed: true` proves a completed reply for that prompt. A previous reply, a streaming reply, a blocked approval, an interrupted turn, and a timeout do not count. If another prompt has overtaken it, the result is `superseded`; inspect thread history rather than treating the newer reply as its result. Replies are capped at 20,000 characters with a `truncated` flag.
 
 `t3_wait_for_idle` remains available for coordinating several threads. Its `allIdle` means none is running, not that every task succeeded. Send new work only after the current turn stops; resolve pending questions or approvals through T3. Thread state and the final report remain the source of truth.
 

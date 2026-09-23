@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile, link, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import type { Command } from "./types.js";
@@ -18,10 +18,11 @@ function canonical(value: unknown): string {
 
 export interface DispatchRecord {
   fingerprint: string;
+  previousTurnId: string | null;
   command: Extract<Command, { type: "thread.turn.start" }>;
 }
 
-export async function prepareDispatch(origin: string, scope: string, key: string | undefined, input: unknown, build: () => DispatchRecord["command"] | Promise<DispatchRecord["command"]>, directory = process.env.T3_ORCHESTRATOR_CONFIG_DIR ?? path.join(homedir(), ".config", "t3-orchestrator-mcp")) {
+export async function prepareDispatch(origin: string, scope: string, key: string | undefined, input: unknown, build: () => DispatchRecord["command"] | Promise<DispatchRecord["command"]>, directory = process.env.T3_ORCHESTRATOR_CONFIG_DIR ?? path.join(homedir(), ".config", "t3-orchestrator-mcp"), previousTurnId: string | null = null) {
   const idempotencyKey = key ?? randomUUID();
   const dir = path.join(directory, "dispatches");
   const file = path.join(dir, `${hash(`${origin}\n${scope}\n${idempotencyKey}`)}.json`);
@@ -35,13 +36,17 @@ export async function prepareDispatch(origin: string, scope: string, key: string
   catch (error) {
     if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
   }
-  const record: DispatchRecord = { fingerprint, command: await build() };
+  const record: DispatchRecord = { fingerprint, previousTurnId, command: await build() };
   await mkdir(dir, { recursive: true, mode: 0o700 });
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  await writeFile(temporary, JSON.stringify(record), { flag: "wx", mode: 0o600, flush: true });
   try {
-    await writeFile(file, JSON.stringify(record), { flag: "wx", mode: 0o600 });
+    await link(temporary, file);
     return { ...record, idempotencyKey, reused: false };
   } catch (error) {
     if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
     return readExisting();
+  } finally {
+    await unlink(temporary);
   }
 }

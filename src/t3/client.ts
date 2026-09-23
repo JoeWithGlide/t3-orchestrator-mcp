@@ -74,7 +74,7 @@ export async function exchangePairingUrl(pairingUrl: string, clientLabel: string
 }
 
 export class T3Client {
-  private environmentId: string | undefined;
+  private environment: Promise<string> | undefined;
   constructor(
     readonly origin: string,
     private readonly accessToken: string,
@@ -115,12 +115,7 @@ export class T3Client {
     return json as T;
   }
 
-  async shell(): Promise<ShellSnapshot> {
-    if (!this.environmentId) {
-      const environment = await this.request<{ environmentId: string }>("GET", "/.well-known/t3/environment");
-      if (typeof environment.environmentId !== "string") throw new Error("T3 did not return its environment ID.");
-      this.environmentId = environment.environmentId;
-    }
+  shell(): Promise<ShellSnapshot> {
     return this.request("GET", "/api/orchestration/shell");
   }
 
@@ -154,8 +149,13 @@ export class T3Client {
     }
   }
 
-  threadUrl(threadId: string): string {
-    return new URL(`/${encodeURIComponent(this.environmentId!)}/${encodeURIComponent(threadId)}`, this.origin).href;
+  async threadUrl(threadId: string): Promise<string> {
+    this.environment ??= this.request<{ environmentId: string }>("GET", "/.well-known/t3/environment")
+      .then(({ environmentId }) => {
+        if (typeof environmentId !== "string") throw new Error("T3 did not return its environment ID.");
+        return environmentId;
+      }).catch((error) => { this.environment = undefined; throw error; });
+    return new URL(`/${encodeURIComponent(await this.environment)}/${encodeURIComponent(threadId)}`, this.origin).href;
   }
 
   dispatch(command: Command): Promise<DispatchResult> {
