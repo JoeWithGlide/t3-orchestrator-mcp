@@ -90,12 +90,13 @@ test('MCP retries launch once, recover lost responses, attach worktrees, and ded
   process.env.T3_ORCHESTRATOR_CONFIG_DIR = dir;
   const threads = [];
   let starts = 0, sends = 0, lastCommand;
+  let urlUnavailable = true;
   const api = {
     origin: 'http://t3',
     shell: async () => ({ projects: [{ id: 'p', title: 'project', workspaceRoot: '/repo', defaultModelSelection: { instanceId: 'codex', model: 'default', options: [{ id: 'effort', value: 'low' }] } }], threads }),
     providers: async () => [{ instanceId: 'codex', enabled: true, installed: true, status: 'ready', auth: { status: 'authenticated' }, models: [{ slug: 'default' }] }],
     refs: async () => [{ name: 'main', worktreePath: '/repo' }, { name: 'issue', worktreePath: '/repo-issue' }],
-    threadUrl: id => `http://t3/env/${id}`,
+    threadUrl: async id => { if (urlUnavailable) throw new Error("environment unavailable"); return `http://t3/env/${id}`; },
     thread: async id => ({ thread: threads.find(t => t.id === id) }),
     rpc: async (_tag, c) => {
       starts++; lastCommand = c;
@@ -118,6 +119,9 @@ test('MCP retries launch once, recover lost responses, attach worktrees, and ded
     const first = await call('t3_start_thread', input);
     assert.equal(first.isError, true);
     assert.equal(first.structuredContent.recoveryRequired, true);
+    assert.equal(first.structuredContent.url, null);
+    assert.ok(first.structuredContent.threadId);
+    urlUnavailable = false;
     const retry = await call('t3_start_thread', input);
     assert.equal(retry.isError, undefined);
     assert.equal(retry.structuredContent.threadId, first.structuredContent.threadId);

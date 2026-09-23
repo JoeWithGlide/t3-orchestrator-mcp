@@ -306,7 +306,7 @@ export function registerThreadTools(server: McpServer, client: T3Client): void {
           ...(wait ? { result: await waitForTurn(client, command.threadId, command.message.messageId, dispatch.previousTurnId, timeoutSeconds) } : {}),
         });
       } catch (error) {
-        return recovery ? { ...errorResult(error), structuredContent: { ...recovery, url: await client.threadUrl(recovery.threadId), recoveryRequired: true } } : errorResult(error);
+        return recovery ? { ...errorResult(error), structuredContent: { ...recovery, url: await client.threadUrl(recovery.threadId).catch(() => null), recoveryRequired: true } } : errorResult(error);
       }
     },
   );
