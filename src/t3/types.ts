@@ -24,7 +24,7 @@ export type InteractionMode = "default" | "plan";
 export interface ModelSelection {
   instanceId: string;
   model: string;
-  options?: Record<string, unknown>;
+  options?: Record<string, unknown> | Array<{ id: string; value?: unknown }> | undefined;
 }
 
 export interface Session {
@@ -120,13 +120,7 @@ export interface DispatchResult {
   sequence: number;
 }
 
-/**
- * Commands we send through POST /api/orchestration/dispatch.
- *
- * Note: the `bootstrap` field of thread.turn.start (create thread + prepare
- * worktree in one call) is only honored on the WebSocket path. Over HTTP the
- * command goes straight to the decider, so we create the thread ourselves.
- */
+// Bootstrap is sent over WebSocket RPC; ordinary commands use HTTP.
 export type Command =
   | {
       type: "thread.create";
@@ -146,6 +140,12 @@ export type Command =
       commandId: string;
       threadId: string;
       message: { messageId: string; role: "user"; text: string; attachments: [] };
+      modelSelection?: ModelSelection;
+      bootstrap?: {
+        createThread?: Omit<Extract<Command, { type: "thread.create" }>, "type" | "commandId" | "threadId">;
+        prepareWorktree?: { projectCwd: string; baseBranch: string; branch?: string; startFromOrigin?: boolean };
+        runSetupScript?: boolean;
+      };
       titleSeed?: string;
       runtimeMode: RuntimeMode;
       interactionMode: InteractionMode;
@@ -155,3 +155,22 @@ export type Command =
   | { type: "thread.delete"; commandId: string; threadId: string }
   | { type: "thread.meta.update"; commandId: string; threadId: string; title: string }
   | { type: "thread.archive"; commandId: string; threadId: string; createdAt: string };
+
+export interface Provider {
+  instanceId: string;
+  driver: string;
+  displayName?: string;
+  enabled: boolean;
+  installed: boolean;
+  status: string;
+  auth: { status: string };
+  availability?: string;
+  message?: string;
+  models: Array<{ slug: string; name: string; aliases?: string[]; isDefault?: boolean }>;
+}
+
+export interface VcsRef {
+  name: string;
+  current: boolean;
+  worktreePath: string | null;
+}

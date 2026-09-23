@@ -1,6 +1,6 @@
 # t3-orchestrator-mcp
 
-An MCP server that lets a coding agent start, monitor, and steer [T3 Code](https://github.com/pingdotgg/t3code) threads. It talks to T3 Code's public HTTP API only, so it lives outside the T3 Code repo and is not pinned to a release.
+An MCP server that lets a coding agent start, monitor, and steer [T3 Code](https://github.com/pingdotgg/t3code) threads. It uses T3 Code's HTTP API for thread reads and ordinary commands, and authenticated WebSocket RPC for provider discovery and native worktree bootstrap. Tested against T3 Code 0.0.42.
 
 Typical use: an orchestrator agent (in Claude Code, or in a T3 thread itself) fans a batch of tickets out into one T3 thread each, then checks back on them.
 
@@ -11,7 +11,10 @@ Typical use: an orchestrator agent (in Claude Code, or in a T3 thread itself) fa
 | `t3_list_projects` | Projects with workspace root and default model |
 | `t3_list_threads` | One-line status per thread: `running` / `blocked` / `idle` / `error` |
 | `t3_get_thread` | Newest messages and activity for one thread |
-| `t3_start_thread` | Create a thread and send its first prompt, optionally in a fresh git worktree |
+| `t3_start_thread` | Start a thread in a new or existing worktree, with optional setup and wait |
+| `t3_list_harnesses` | Configured provider instances, availability, and models |
+| `t3_list_worktrees` | Local branches and worktree paths for a project |
+| `t3_wait_for_turn` | Wait for a specific message and return its completed reply |
 | `t3_send_message` | Follow-up message on an existing thread |
 | `t3_wait_for_idle` | Block (up to 5 min) until listed threads stop running |
 | `t3_interrupt_thread` | Stop the current turn |
@@ -80,7 +83,27 @@ The cmux-based flow (create workspace, wait for shell, send `cc '...'`, wait for
 2. One `t3_start_thread` per ticket with the full prompt, a title like `BUG-2688 (pscu)`, `runtimeMode: "auto"`, and `worktree: { baseBranch: "main" }` if the investigations should not share a checkout.
 3. `t3_wait_for_idle` with all the thread ids, then `t3_get_thread` on each to read the final assistant message.
 
-No `INVESTIGATION_COMPLETE` sentinel is needed. A turn is over when the thread's phase leaves `running`. `blocked` means the agent is waiting on an approval or a question; answer it in the T3 UI or from mobile.
+Use `t3_list_harnesses` when choosing an explicit provider/model. Omitted model selection still uses the project default, then the most recent thread. Both array and record forms of model options are preserved.
+
+### Worktrees and setup
+
+Pass `worktree: { baseBranch: "main", branch: "my-issue", runSetupScript: true }` to let T3 create the worktree and run its configured setup script. The local base branch must exist. `startFromOrigin: true` asks T3 to fetch first, with T3's local-base fallback when no matching remote exists. Setup remains off by default for compatibility. T3 controls whether setup runs synchronously or in the background according to the script's `async` setting.
+
+To attach an existing checkout, pass a `worktreePath` returned by `t3_list_worktrees`, instead of `worktree`. Only paths belonging to the selected project are accepted. The coordinator must keep one writer per worktree.
+
+### Retries and recovery
+
+Persist an `idempotencyKey` before calling start or send. Reuse it with identical task arguments after a timeout; `wait` and `timeoutSeconds` may change. Calls return the key, `threadId`, `messageId`, and a local T3 URL. Changed task arguments under an existing key are rejected.
+
+Dispatch records live under `~/.config/t3-orchestrator-mcp/dispatches`, or `T3_ORCHESTRATOR_CONFIG_DIR`. They contain prompts and resolved commands, with directory mode 0700 and file mode 0600. Keep these records while a coordinator may retry, and use the same config directory across coordinator restarts. A different directory or a deleted record loses duplicate protection.
+
+Launch records are written before submitting T3's bootstrap. A retry reads the original thread and never resubmits that bootstrap, because T3 setup has side effects outside its command receipts. If a crash occurred before submission, or the outcome remains uncertain, the tool returns recovery IDs and an error. Inspect that thread and worktree before choosing a new key. Interrupted or failed workers are not automatically relaunched. Follow-up retries reuse the same T3 command and message IDs.
+
+### Waiting
+
+Use `wait: true` on start/send, or call `t3_wait_for_turn` with their returned `messageId`. Only `completed: true` proves a completed reply for that prompt. A previous reply, a streaming reply, a blocked approval, an interrupted turn, and a timeout do not count. If another prompt has overtaken it, the result is `superseded`; inspect thread history rather than treating the newer reply as its result. Replies are capped at 20,000 characters with a `truncated` flag.
+
+`t3_wait_for_idle` remains available for coordinating several threads. Its `allIdle` means none is running, not that every task succeeded. Send new work only after the current turn stops; resolve pending questions or approvals through T3. Thread state and the final report remain the source of truth.
 
 ## How it talks to T3 Code
 
@@ -88,10 +111,9 @@ No `INVESTIGATION_COMPLETE` sentinel is needed. A turn is over when the thread's
 - `GET /api/orchestration/threads/:id?turnLimit=N` for messages and activity
 - `POST /api/orchestration/dispatch` with `thread.create`, `thread.turn.start`, `thread.turn.interrupt`, `thread.meta.update`, `thread.delete`
 
-The WebSocket path's `bootstrap` (create thread, prepare worktree, run setup script in one `thread.turn.start`) is not honored over HTTP, so `t3_start_thread` sends `thread.create` then `thread.turn.start`, and creates worktrees itself with `git worktree add` using T3's own conventions (branch `t3code/<hex>`, path `~/.t3/worktrees/<repo>/<branch>`). The project's worktree setup script does not run; put any setup in the prompt.
-- `POST /oauth/token` once, to exchange the pairing credential for a bearer token
+New threads use `orchestration.dispatchCommand` over `/ws` with T3's `bootstrap.createThread` and optional `prepareWorktree`. T3 owns worktree creation and setup. The bridge does not open T3's database or run Git commands locally. `server.getConfig` and `vcs.listRefs` provide provider and worktree discovery.
 
-The wire types in `src/t3/types.ts` are a hand-written, tolerant subset of `packages/contracts` in the T3 Code repo. When upstream changes a field, update that one file.
+The wire types are a small subset of T3's contracts. Unknown turn/session states fail explicitly rather than appearing idle. T3's application APIs can change; verify compatibility when upgrading the server.
 
 ## Development
 
@@ -99,4 +121,5 @@ The wire types in `src/t3/types.ts` are a hand-written, tolerant subset of `pack
 npm run dev                # run from source over stdio
 npm run inspect            # MCP Inspector against dist/
 npm run typecheck
+npm test                   # RPC, retry, and turn-matching tests
 ```
