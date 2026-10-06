@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { rpcCall } from "./rpc.js";
 
-import type { Command, DispatchResult, ShellSnapshot, ThreadDetailSnapshot } from "./types.js";
+import type { Command, DispatchResult, ShellSnapshot, ThreadDetailSnapshot, Provider, VcsRef } from "./types.js";
 
 const REQUESTED_SCOPES = "orchestration:read orchestration:operate";
 
@@ -73,6 +74,7 @@ export async function exchangePairingUrl(pairingUrl: string, clientLabel: string
 }
 
 export class T3Client {
+  private environment: Promise<string> | undefined;
   constructor(
     readonly origin: string,
     private readonly accessToken: string,
@@ -83,6 +85,7 @@ export class T3Client {
     try {
       response = await fetch(`${this.origin}${pathname}`, {
         method,
+        signal: AbortSignal.timeout(30_000),
         headers: {
           authorization: `Bearer ${this.accessToken}`,
           accept: "application/json",
@@ -119,6 +122,40 @@ export class T3Client {
   thread(threadId: string, turnLimit?: number): Promise<ThreadDetailSnapshot> {
     const query = turnLimit ? `?turnLimit=${turnLimit}` : "";
     return this.request("GET", `/api/orchestration/threads/${encodeURIComponent(threadId)}${query}`);
+  }
+
+  rpc<T>(tag: string, payload: unknown, timeoutMs?: number): Promise<T> {
+    return rpcCall<T>(this.origin, this.accessToken, tag, payload, timeoutMs);
+  }
+
+  async providers(): Promise<Provider[]> {
+    const config = await this.rpc<{ providers: Provider[] }>("server.getConfig", {});
+    if (!Array.isArray(config.providers)) throw new Error("T3 server.getConfig omitted providers.");
+    return config.providers;
+  }
+
+  async refs(cwd: string): Promise<VcsRef[]> {
+    const refs: VcsRef[] = [];
+    let cursor: number | undefined;
+    for (;;) {
+      const page = await this.rpc<{ refs: VcsRef[]; nextCursor: number | null }>("vcs.listRefs", {
+        cwd, refKind: "local", limit: 200, refresh: cursor === undefined, ...(cursor === undefined ? {} : { cursor }),
+      });
+      if (!Array.isArray(page.refs) || !(page.nextCursor === null || typeof page.nextCursor === "number")) throw new Error("T3 vcs.listRefs returned an unknown page format.");
+      refs.push(...page.refs);
+      if (page.nextCursor === null) return refs;
+      if (page.nextCursor <= (cursor ?? -1)) throw new Error("T3 vcs.listRefs did not advance its cursor.");
+      cursor = page.nextCursor;
+    }
+  }
+
+  async threadUrl(threadId: string): Promise<string> {
+    this.environment ??= this.request<{ environmentId: string }>("GET", "/.well-known/t3/environment")
+      .then(({ environmentId }) => {
+        if (typeof environmentId !== "string") throw new Error("T3 did not return its environment ID.");
+        return environmentId;
+      }).catch((error) => { this.environment = undefined; throw error; });
+    return new URL(`/${encodeURIComponent(await this.environment)}/${encodeURIComponent(threadId)}`, this.origin).href;
   }
 
   dispatch(command: Command): Promise<DispatchResult> {
